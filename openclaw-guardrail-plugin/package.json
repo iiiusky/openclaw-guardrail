@@ -1,0 +1,15 @@
+{
+  "name": "openclaw-guardrail",
+  "version": "1.3.2",
+  "description": "OpenClaw Guardrail Plugin: domain blocklist, tool call audit, scheduled scanning, violation reporting",
+  "main": "src/index.ts",
+  "openclaw": {
+    "type": "plugin",
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  }
+}

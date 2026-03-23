@@ -1,0 +1,50 @@
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-openclaw_sec_2026}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-openclaw_security}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-80}:80"
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-openclaw_sec_2026}
+      MYSQL_DB: ${MYSQL_DATABASE:-openclaw_security}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      COS_PLUGIN_URL: ${COS_PLUGIN_URL:-}
+      WEB_DIST_DIR: /app/web-dist
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mysql_data:

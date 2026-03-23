@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenClaw Guardrail Scan Result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scan_id",
+    "timestamp",
+    "openclaw_version",
+    "os",
+    "workspace",
+    "scan_type",
+    "summary",
+    "steps",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "scan_id": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "openclaw_version": { "type": "string" },
+    "os": { "type": "string" },
+    "workspace": { "type": "string" },
+    "scan_type": { "type": "string", "enum": ["all", "skills", "config", "dlp"] },
+    "summary": {
+      "type": "object",
+      "required": ["total_findings", "critical", "high", "medium", "low"],
+      "properties": {
+        "total_findings": { "type": "integer" },
+        "critical": { "type": "integer" },
+        "high": { "type": "integer" },
+        "medium": { "type": "integer" },
+        "low": { "type": "integer" }
+      }
+    },
+    "steps": { "type": "object" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "type", "location", "description"],
+        "properties": {
+          "severity": { "type": "string" },
+          "type": { "type": "string" },
+          "location": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}
