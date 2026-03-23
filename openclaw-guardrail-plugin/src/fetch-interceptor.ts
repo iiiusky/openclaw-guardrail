@@ -70,13 +70,22 @@ async function bodyInitToText(body: BodyInit): Promise<string> {
   return "";
 }
 
-export function installFetchInterceptor(api: PluginApi, logger: PluginApi["logger"]): void {
-  const originalFetch = globalThis.fetch;
-  if (!originalFetch) {
-    logger.warn("[openclaw-guardrail] globalThis.fetch 不可用，跳过 fetch 拦截");
-    return;
-  }
+export function collectProviderBaseUrls(config: PluginApi["config"] | undefined): string[] {
+  const providersRaw = config?.models?.providers;
+  if (!providersRaw || typeof providersRaw !== "object") return [];
 
+  const urls: string[] = [];
+  for (const provider of Object.values(providersRaw as Record<string, unknown>)) {
+    if (!provider || typeof provider !== "object") continue;
+    const baseUrl = (provider as { baseUrl?: unknown }).baseUrl;
+    if (typeof baseUrl === "string" && baseUrl.trim().length > 0) {
+      urls.push(baseUrl.trim());
+    }
+  }
+  return urls;
+}
+
+export function createProviderUrlMatcher(api: PluginApi): (url: string) => boolean {
   let providerUrls: string[] = [];
   let lastConfigTouch: unknown = undefined;
 
@@ -85,28 +94,23 @@ export function installFetchInterceptor(api: PluginApi, logger: PluginApi["logge
     const touched = config.meta?.lastTouchedAt;
     if (touched === lastConfigTouch && providerUrls.length > 0) return;
     lastConfigTouch = touched;
-
-    const providersRaw = config.models?.providers;
-    if (!providersRaw || typeof providersRaw !== "object") {
-      providerUrls = [];
-      return;
-    }
-
-    const urls: string[] = [];
-    for (const provider of Object.values(providersRaw as Record<string, unknown>)) {
-      if (!provider || typeof provider !== "object") continue;
-      const baseUrl = (provider as { baseUrl?: unknown }).baseUrl;
-      if (typeof baseUrl === "string" && baseUrl.length > 0) {
-        urls.push(baseUrl);
-      }
-    }
-    providerUrls = urls;
+    providerUrls = collectProviderBaseUrls(config);
   }
 
-  function matchesProvider(url: string): boolean {
+  return (url: string): boolean => {
     refreshProviderUrls();
     return providerUrls.some((base) => url.startsWith(base));
+  };
+}
+
+export function installFetchInterceptor(api: PluginApi, logger: PluginApi["logger"]): void {
+  const originalFetch = globalThis.fetch;
+  if (!originalFetch) {
+    logger.warn("[openclaw-guardrail] globalThis.fetch 不可用，跳过 fetch 拦截");
+    return;
   }
+
+  const matchesProvider = createProviderUrlMatcher(api);
 
   function checkContent(text: string): { action: SecurityAction; reason: string } {
     const criticalDlp = DLP_PATTERNS.filter((p) => p.severity === "critical" && p.category === "credential");
