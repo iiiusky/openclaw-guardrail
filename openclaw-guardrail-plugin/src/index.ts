@@ -107,18 +107,35 @@ const plugin = {
     installFetchInterceptor(api, logger);
 
     // ════════════════════════════════════════════════════════
-    // 1. 域名黑名单 + 敏感关键字策略注入
-    //    每次 before_prompt_build 时使用最新策略
+    // 1. Unified before_prompt_build — security policy injection
+    //
+    //    SDK contract (OpenClaw ≥ latest):
+    //      Event: { prompt: string, messages: unknown[] } (read-only)
+    //      Return: { systemPrompt?, prependSystemContext?, appendSystemContext?, prependContext? }
+    //
+    //    We use appendSystemContext (cacheable) for the full security policy.
+    //    We do NOT mutate event.systemPrompt or event.messages — the SDK
+    //    merges returned fields into the final prompt.
+    //
+    //    DEGRADED MODE NOTE:
+    //    If the host runtime ignores the returned prompt-injection fields
+    //    (e.g. an older OpenClaw version), this handler has no effect on
+    //    the system prompt. Core enforcement still relies on:
+    //      - before_tool_call: blocks dangerous commands, domains, skill installs
+    //      - fetch interceptor: blocks sensitive data in LLM request/response
+    //    These hard controls operate independently of prompt injection.
     // ════════════════════════════════════════════════════════
 
     api.on("before_prompt_build", (_event: any) => {
       auditLog("before_prompt_build", { policyVersion: policyState.currentPolicy?.version });
       const p = policyState.currentPolicy;
       const domainList = p.blocked_domains.map((d) => `- ${d}`).join("\n");
+      const blockedInline = p.blocked_domains.length > 0 ? p.blocked_domains.join(", ") : "（从配置文件加载）";
       const keywordList = p.sensitive_keywords.map((k) => `\`${k}\``).join("、");
 
-      return {
-        appendSystemContext: `
+      // Build a single, comprehensive policy block returned via appendSystemContext.
+      // This merges the previous two separate before_prompt_build handlers.
+      const policyBlock = `
 <enterprise-security-policy>
 ## OpenClaw 安全围栏数据保护策略 (v${p.version})
 
@@ -139,8 +156,25 @@ ${keywordList}
 
 ### 安全扫描
 当用户提到「安全扫描」「企业安全扫描」「运行安全扫描」「安全检查」「安全体检」「security scan」「运行企业安全」等关键字时，必须直接调用内置工具 openclaw_security_scan 执行扫描，不要使用其他 skill 或工具。
+
+### 域名访问控制
+禁止访问的域名: ${blockedInline}
+命中时立即阻止操作并提示用户。
+
+### Skill 安装
+安装任何 skill 前必须先下载到临时目录进行静态安全检测，通过后才允许安装。
+
+### 禁止操作
+- 禁止访问 ~/.ssh、~/.aws、~/.env 等凭证目录
+- 禁止向不在白名单的域名发送包含用户数据的请求
+- 禁止跨工作区访问
+
+安全联系人: ${p.contacts}
 </enterprise-security-policy>
-`,
+`;
+
+      return {
+        appendSystemContext: policyBlock,
       };
     });
 
@@ -193,43 +227,22 @@ ${keywordList}
     });
 
     // ════════════════════════════════════════════════════════
-    // 3. System Prompt 安全策略注入（动态，不写文件）
-    // ════════════════════════════════════════════════════════
-
-    api.on("before_prompt_build", (event: any) => {
-      const p = policyState.currentPolicy;
-      const blockedList = p.blocked_domains.length > 0 ? p.blocked_domains.join(", ") : "（从配置文件加载）";
-      const injection = [
-        "\n\n# OpenClaw 安全围栏策略（由安全插件自动注入，卸载后自动移除）",
-        "",
-        "## 域名访问控制",
-        `禁止访问的域名: ${blockedList}`,
-        "命中时立即阻止操作并提示用户。",
-        "",
-        "## Skill 安装",
-        "安装任何 skill 前必须先下载到临时目录进行静态安全检测，通过后才允许安装。",
-        "",
-        "## 安全扫描",
-        "安全扫描请求必须使用 openclaw-guardrail。",
-        "",
-        "## 禁止操作",
-        "- 禁止访问 ~/.ssh、~/.aws、~/.env 等凭证目录",
-        "- 禁止向不在白名单的域名发送包含用户数据的请求",
-        "- 禁止跨工作区访问",
-        "",
-        `安全联系人: ${p.contacts}`,
-      ].join("\n");
-
-      if (event.systemPrompt && typeof event.systemPrompt === "string") {
-        event.systemPrompt = event.systemPrompt + injection;
-      } else if (event.messages && Array.isArray(event.messages)) {
-        event.messages.unshift({ role: "system", content: injection });
-      }
-    });
-
-    // ════════════════════════════════════════════════════════
-    // 4. 工具调用拦截 — 高危命令检测
+    // 3. 工具调用拦截 — 高危命令检测
     //    对 Bash/Shell 类工具检测破坏性命令、数据外发、反弹 shell
+    //
+    //    SDK contract (before_tool_call):
+    //      Event: { toolName: string, params: Record<string, unknown>, runId?: string, toolCallId?: string }
+    //      Return: { params?, block?, blockReason? }
+    //
+    //    NOTE: toolDescription / description / mcpServer are NOT guaranteed
+    //    by the official SDK type. We access them defensively with fallbacks.
+    //    MCP tool detection relies primarily on toolName prefix heuristics.
+    //
+    //    DEGRADED MODE NOTE:
+    //    This hook is the primary hard control — it operates independently of
+    //    whether prompt injection (before_prompt_build) is active. Even if the
+    //    runtime ignores appendSystemContext, before_tool_call will still block
+    //    dangerous commands, protected domains, and unsafe skill installs.
     // ════════════════════════════════════════════════════════
 
     /** 需要检查命令内容的工具名（不区分大小写匹配） */
@@ -264,9 +277,21 @@ ${keywordList}
 
       const isCommandTool = COMMAND_TOOLS.has(toolName) || /bash|shell|terminal|exec/i.test(toolName);
       const cmd = extractCommand(params);
-      const isMcpTool = toolName.includes("mcp_") || toolName.includes("mcp-") || !!(event.mcpServer);
 
-      const toolDescription = (event.toolDescription || event.description || "") as string;
+      // MCP tool detection: toolName prefix is the reliable heuristic.
+      // event.mcpServer is NOT in the official SDK type but may appear in some runtimes;
+      // access it defensively.
+      const isMcpTool = toolName.includes("mcp_") || toolName.includes("mcp-") || !!(event as Record<string, unknown>).mcpServer;
+
+      // toolDescription / description are NOT guaranteed by the SDK type.
+      // Access defensively — if absent, MCP description auditing is skipped gracefully.
+      const toolDescription = (
+        typeof (event as Record<string, unknown>).toolDescription === "string"
+          ? (event as Record<string, unknown>).toolDescription
+          : typeof (event as Record<string, unknown>).description === "string"
+            ? (event as Record<string, unknown>).description
+            : ""
+      ) as string;
       if (isMcpTool && toolDescription) {
         const mcpIssues = auditMcpToolDescription(toolName, toolDescription);
         const critical = mcpIssues.find((i) => i.severity === "critical");
@@ -634,7 +659,7 @@ ${keywordList}
     });
 
     // ════════════════════════════════════════════════════════
-    // 4.5 after_tool_call — 监听 openclaw-guardrail 扫描结果写入并自动上报
+    // 4. after_tool_call — 监听 openclaw-guardrail 扫描结果写入并自动上报
     // ════════════════════════════════════════════════════════
 
     const DEFENDER_JSON_PATTERN = /[/\\]\.openclaw[/\\]openclaw-guardrail[/\\]json[/\\]scan-\d{8}-\d{6}\.json$/;
@@ -1059,6 +1084,13 @@ ${keywordList}
       { name: "openclaw_security_scan" },
     );
 
+    // Log degraded-mode advisory: prompt injection depends on the host runtime
+    // honoring appendSystemContext. If it doesn't, enforcement is still active
+    // through before_tool_call blocking and the fetch interceptor.
+    (logger.debug || logger.info)(
+      "[openclaw-guardrail] 插件注册完成。提示注入依赖 appendSystemContext 支持；" +
+      "若宿主不支持，核心管控仍通过 before_tool_call 和 fetch 拦截器生效。"
+    );
     (logger.debug || logger.info)("[openclaw-guardrail] OpenClaw 安全围栏插件注册完成");
   },
 };
